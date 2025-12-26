@@ -1,0 +1,9 @@
+# Ignore the secret password file
+.env
+
+# Ignore executable files
+*.exe
+*.exe~
+
+# Ignore temp folders
+tmp/
