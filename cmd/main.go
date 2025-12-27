@@ -13,82 +13,137 @@ import (
 	"github.com/go-rod/stealth"
 	"github.com/joho/godotenv"
 
-	// Import our local package
 	"linkedin-bot/internal/humanizer"
+	"linkedin-bot/internal/search"
+	"linkedin-bot/internal/security"
+	"linkedin-bot/internal/session"
 )
 
 func main() {
-	// --- 1. LOAD CONFIGURATION ---
-	// We look for .env in the root directory (../.env) because main is inside cmd/
-	// However, if you run "go run cmd/main.go" from root, it looks in root.
+	// -------------------------------
+	// 1. LOAD ENV VARIABLES
+	// -------------------------------
 	err := godotenv.Load()
 	if err != nil {
-		// Fallback: try loading from one directory up if running from inside cmd
 		_ = godotenv.Load("../.env")
 	}
 
-	// If still empty, warn user
-	if os.Getenv("LINKEDIN_EMAIL") == "" {
-		log.Println("Warning: Could not load .env file. Make sure it exists in the project root.")
+	username := os.Getenv("LINKEDIN_EMAIL")
+	password := os.Getenv("LINKEDIN_PASSWORD")
+
+	if username == "" || password == "" {
+		log.Fatal("❌ LINKEDIN_EMAIL or LINKEDIN_PASSWORD missing in .env")
 	}
 
-	linkedInUsername := os.Getenv("LINKEDIN_EMAIL")
-	linkedInPassword := os.Getenv("LINKEDIN_PASSWORD")
-
-	if linkedInUsername == "" || linkedInPassword == "" {
-		log.Fatal("Error: Credentials empty. Check .env file.")
-	}
-
+	// -------------------------------
+	// 2. LAUNCH STEALTH BROWSER
+	// -------------------------------
 	fmt.Println("Launching Stealth Browser...")
+
 	u := launcher.New().
 		Headless(false).
 		Leakless(false).
 		MustLaunch()
 
-	browser := rod.New().ControlURL(u).MustConnect()
+	browser := rod.New().
+		ControlURL(u).
+		MustConnect()
 	defer browser.MustClose()
 
 	page := stealth.MustPage(browser)
 
-	// --- 2. LOGIN ---
-	fmt.Println("Navigating to LinkedIn Login...")
-	page.MustNavigate("https://www.linkedin.com/login")
-	page.MustWaitStable()
+	loggedIn := false
 
-	fmt.Println("Typing Credentials...")
-	// USAGE OF NEW PACKAGE HERE:
-	humanizer.TypeLikeHuman(page.MustElement("#username"), linkedInUsername)
-	humanizer.TypeLikeHuman(page.MustElement("#password"), linkedInPassword)
+	// -------------------------------
+	// 3. TRY RESTORING SESSION
+	// -------------------------------
+	fmt.Println("Attempting to restore previous session...")
 
-	// Safe click for login button
-	loginBtn, _ := page.Element(".btn__primary--large")
-	if loginBtn != nil {
-		loginBtn.MustClick()
+	if session.LoadCookies(page) {
+		page.MustNavigate("https://www.linkedin.com/feed/")
+		time.Sleep(6 * time.Second)
+
+		if security.DetectCheckpoint(page) {
+			fmt.Println("🛑 Checkpoint detected.")
+			fmt.Println("👉 Please solve it manually in the browser.")
+			fmt.Println("👉 Press ENTER after resolving the checkpoint.")
+
+			fmt.Scanln() // wait instead of exiting
+		}
+
+		if strings.Contains(page.MustInfo().URL, "/feed") {
+			fmt.Println("✅ Session restored. Skipping login.")
+			loggedIn = true
+		}
 	}
 
-	fmt.Println("------------------------------------------------")
-	fmt.Println("⚠️  CHECK BROWSER: Solve Captcha if needed.")
-	fmt.Println("Press ENTER when you see the LinkedIn Feed.")
-	fmt.Println("------------------------------------------------")
-	fmt.Scanln()
+	// -------------------------------
+	// 4. LOGIN IF NEEDED
+	// -------------------------------
+	if !loggedIn {
+		fmt.Println("Navigating to LinkedIn Login...")
+		page.MustNavigate("https://www.linkedin.com/login")
+		time.Sleep(4 * time.Second)
 
-	// --- 3. NAVIGATE TO 'MY NETWORK' ---
-	fmt.Println("Navigating to 'My Network'...")
+		fmt.Println("Typing credentials...")
+		humanizer.TypeLikeHuman(page.MustElement("#username"), username, true)
+		humanizer.TypeLikeHuman(page.MustElement("#password"), password, true)
+
+		loginBtn, _ := page.Element(".btn__primary--large")
+		if loginBtn != nil {
+			loginBtn.MustClick()
+		}
+
+		fmt.Println("------------------------------------------------")
+		fmt.Println("⚠️ Solve captcha / 2FA if prompted")
+		fmt.Println("Press ENTER once LinkedIn Feed is visible")
+		fmt.Println("------------------------------------------------")
+		fmt.Scanln()
+		if security.DetectCheckpoint(page) {
+			fmt.Println("🛑 Checkpoint detected.")
+			fmt.Println("👉 Please solve it manually in the browser.")
+			fmt.Println("👉 Press ENTER after resolving the checkpoint.")
+
+			fmt.Scanln() // wait instead of exiting
+		}
+
+		fmt.Println("Saving session cookies...")
+		_ = session.SaveCookies(page)
+	}
+
+	// =================================================
+	// 5. SEARCH PHASE (PHASE-1: FIRST PAGE ONLY)
+	// =================================================
+	searchKeyword := "Data Analyst Hyderabad"
+
+	profiles := search.SearchPeopleAndCollectProfiles(page, searchKeyword)
+
+	fmt.Println("------------------------------------------------")
+	fmt.Println("PROFILE URLS FROM SEARCH (FIRST PAGE)")
+	for i, p := range profiles {
+		fmt.Printf("%d. %s\n", i+1, p)
+	}
+	fmt.Println("------------------------------------------------")
+
+	// -------------------------------
+	// 6. NAVIGATE TO MY NETWORK
+	// -------------------------------
+	fmt.Println("Navigating to My Network...")
 	page.MustNavigate("https://www.linkedin.com/mynetwork/")
-
-	fmt.Println("Waiting 5 seconds for cards to load...")
 	time.Sleep(5 * time.Second)
 
-	// --- 4. CONNECT FROM LIST ---
+	// -------------------------------
+	// 7. SEND CONNECTION REQUESTS
+	// -------------------------------
 	fmt.Println("------------------------------------------------")
-	fmt.Println("STARTING CONNECTION RUN (Max 3 people)")
+	fmt.Println("STARTING CONNECTION RUN (Max 3)")
 	fmt.Println("------------------------------------------------")
 
 	maxInvites := 3
 	invitesSent := 0
 
-	for i := 0; i < maxInvites; i++ {
-		fmt.Printf("[%d/%d] Scanning for 'Connect' button...\n", i+1, maxInvites)
+	for invitesSent < maxInvites {
+		fmt.Printf("[%d/%d] Searching for Connect button...\n", invitesSent+1, maxInvites)
 
 		buttons, _ := page.Elements("button")
 		clicked := false
@@ -100,51 +155,50 @@ func main() {
 			}
 
 			if strings.TrimSpace(txt) == "Connect" {
-				if visible, _ := btn.Visible(); visible {
+				visible, _ := btn.Visible()
+				if !visible {
+					continue
+				}
 
-					btn.ScrollIntoView()
-					humanizer.RandomSleep(500, 1000) // USAGE HERE
+				btn.ScrollIntoView()
+				humanizer.RandomSleep(500, 1000)
 
-					fmt.Println("   -> Found a Connect button! Clicking...")
-
-					err := btn.Click(proto.InputMouseButtonLeft, 1)
-					if err == nil {
-						clicked = true
-						invitesSent++
-						break
-					}
+				fmt.Println("   → Clicking Connect")
+				if err := btn.Click(proto.InputMouseButtonLeft, 1); err == nil {
+					invitesSent++
+					clicked = true
+					break
 				}
 			}
 		}
 
 		if !clicked {
-			fmt.Println("   -> No visible buttons. Scrolling down...")
+			fmt.Println("   → No Connect button found. Scrolling...")
 			page.Mouse.MustScroll(0, 500)
 			time.Sleep(2 * time.Second)
-			i--
-			if invitesSent == 0 && i < -5 {
-				fmt.Println("   -> Stopping to prevent infinite loop.")
-				break
-			}
 			continue
 		}
 
 		time.Sleep(1 * time.Second)
-		popupButtons, _ := page.Elements("button")
-		for _, pBtn := range popupButtons {
-			pTxt, _ := pBtn.Text()
-			if strings.Contains(pTxt, "Send") {
-				fmt.Println("   -> Clicking 'Send' in popup...")
+
+		popupBtns, _ := page.Elements("button")
+		for _, pBtn := range popupBtns {
+			txt, _ := pBtn.Text()
+			if strings.Contains(txt, "Send") {
+				fmt.Println("   → Sending invite")
 				pBtn.Click(proto.InputMouseButtonLeft, 1)
 				break
 			}
 		}
 
-		fmt.Println("   -> ✅ Invite Sent! Waiting 5s...")
-		humanizer.RandomSleep(5000, 6000) // USAGE HERE
+		fmt.Println("   ✅ Invite sent. Cooling down...")
+		humanizer.RandomSleep(5000, 6000)
 	}
 
+	// -------------------------------
+	// 8. EXIT
+	// -------------------------------
 	fmt.Println("------------------------------------------------")
-	fmt.Println("Automation Complete. Closing browser in 5s.")
+	fmt.Println("Automation complete. Closing browser in 5s.")
 	time.Sleep(5 * time.Second)
 }
