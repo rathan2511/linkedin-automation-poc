@@ -7,3 +7,5 @@
 
 # Ignore temp folders
 tmp/
+
+cookies.json
